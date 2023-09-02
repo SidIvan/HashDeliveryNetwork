@@ -65,11 +65,10 @@ async fn load_action(input_data: StoreOutputData, hash_map_mutex: Arc<Mutex<Hash
 #[tokio::main]
 async fn main() {
     let listener = TcpListener::bind("127.0.0.1:8181").await.unwrap();
-    let hash_map = HashMap::new();
-    let mutex = Arc::new(Mutex::new(hash_map));
+    let mutex = Arc::new(Mutex::new(HashMap::new()));
     loop {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let cloned_mutex = Arc::clone(&mutex);
+        let mutex = Arc::clone(&mutex);
         tokio::spawn(async move {
             let mut buf = [0; 1024];
             loop {
@@ -83,17 +82,17 @@ async fn main() {
                 };
                 match serde_json::from_slice::<Value>(&buf[0..num_bytes]) {
                     Ok(input_data) => {
-                        let mutex_for_action = Arc::clone(&cloned_mutex);
+                        let mutex = Arc::clone(&mutex);
                         match input_data["request_type"].as_str().unwrap() {
                             "store" => {
-                                tokio::spawn(store_action(serde_json::from_slice::<StoreInputData>(&buf[0..num_bytes]).unwrap(), mutex_for_action)).await;
+                                tokio::spawn(store_action(serde_json::from_slice::<StoreInputData>(&buf[0..num_bytes]).unwrap(), mutex)).await;
                                 let mut b: Vec<u8> = Vec::new();
                                 let out = StoreResponse{response_status: "success".to_string()};
                                 serde_json::to_writer(&mut b, &out);
                                 socket.write_all(&b).await;
                             }, 
                            "load" => {
-                                let res = tokio::spawn(load_action(serde_json::from_slice::<StoreOutputData>(&buf[0..num_bytes]).unwrap(), mutex_for_action)).await;
+                                let res = tokio::spawn(load_action(serde_json::from_slice::<StoreOutputData>(&buf[0..num_bytes]).unwrap(), mutex)).await;
                                 match res {
                                     Ok(Response::SuccessLoad(r)) => {
                                         let mut b: Vec<u8> = Vec::new();
