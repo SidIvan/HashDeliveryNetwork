@@ -1,10 +1,8 @@
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
+use serde_json::{Result, Value};
+use mongodb::{bson::doc, options::{ClientOptions, ServerApi, ServerApiVersion}, Client, Collection};
 
 #[derive(Deserialize)]
 struct StoreInputData {
@@ -48,16 +46,21 @@ enum Response {
     FailedLoad
 }
 
-async fn store_action(input_data: StoreInputData, hash_map_mutex: Arc<Mutex<HashMap<String, String>>>) -> Response {
-    let mut hash_map = hash_map_mutex.lock().await;
-    hash_map.insert(input_data.key, input_data.hash);
+async fn store_action(input_data: StoreInputData) -> Response {
+    let mut opts = ClientOptions::parse("mongodb://localhost:27017").await.unwrap();
+    opts.server_api = Some(ServerApi::builder().version(ServerApiVersion::V1).build());
+    let collection: Collection<Document> = Client::with_options(opts).unwrap().database("hash_db").collection("hashes");    
+    collection.insert_one(Document{key: input_data.key, hash: input_data.hash}, None).await;
     Response::SuccessStore
 }
 
-async fn load_action(input_data: StoreOutputData, hash_map_mutex: Arc<Mutex<HashMap<String, String>>>) -> Response {
-    let hash_map = hash_map_mutex.lock().await;
-    match hash_map.get(&input_data.key) {
-        Some(doc) => Response::SuccessLoad(Document{key: input_data.key, hash: doc.to_string()}),
+async fn load_action(input_data: StoreOutputData) -> Response {
+    let mut opts = ClientOptions::parse("mongodb://localhost:27017").await.unwrap();
+    opts.server_api = Some(ServerApi::builder().version(ServerApiVersion::V1).build());
+    let collection: Collection<Document> = Client::with_options(opts).unwrap().database("hash_db").collection("hashes");    
+    let res = collection.find_one(Some(doc!{"key": input_data.key}), None).await.unwrap();
+    match res {
+        Some(doc) => Response::SuccessLoad(doc),
         None => Response::FailedLoad,
     }
 }
@@ -65,11 +68,8 @@ async fn load_action(input_data: StoreOutputData, hash_map_mutex: Arc<Mutex<Hash
 #[tokio::main]
 async fn main() {
     let listener = TcpListener::bind("127.0.0.1:8181").await.unwrap();
-    let hash_map = HashMap::new();
-    let mutex = Arc::new(Mutex::new(hash_map));
     loop {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let cloned_mutex = Arc::clone(&mutex);
         tokio::spawn(async move {
             let mut buf = [0; 1024];
             loop {
@@ -83,17 +83,16 @@ async fn main() {
                 };
                 match serde_json::from_slice::<Value>(&buf[0..num_bytes]) {
                     Ok(input_data) => {
-                        let mutex_for_action = Arc::clone(&cloned_mutex);
                         match input_data["request_type"].as_str().unwrap() {
                             "store" => {
-                                tokio::spawn(store_action(serde_json::from_slice::<StoreInputData>(&buf[0..num_bytes]).unwrap(), mutex_for_action)).await;
+                                let res = tokio::spawn(store_action(serde_json::from_slice::<StoreInputData>(&buf[0..num_bytes]).unwrap())).await;
                                 let mut b: Vec<u8> = Vec::new();
                                 let out = StoreResponse{response_status: "success".to_string()};
                                 serde_json::to_writer(&mut b, &out);
                                 socket.write_all(&b).await;
                             }, 
                            "load" => {
-                                let res = tokio::spawn(load_action(serde_json::from_slice::<StoreOutputData>(&buf[0..num_bytes]).unwrap(), mutex_for_action)).await;
+                                let res = tokio::spawn(load_action(serde_json::from_slice::<StoreOutputData>(&buf[0..num_bytes]).unwrap())).await;
                                 match res {
                                     Ok(Response::SuccessLoad(r)) => {
                                         let mut b: Vec<u8> = Vec::new();
